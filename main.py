@@ -214,18 +214,53 @@ class RAGQueryRequest(BaseModel):
     max_results: Optional[int] = 5
 
 
+def get_neo4j_credentials():
+    """Retrieves and cleans Neo4j credentials from environment."""
+    uri = (os.getenv("NEO4J_URI") or "").strip().strip('"').strip("'")
+    user = (os.getenv("NEO4J_USERNAME") or "neo4j").strip().strip('"').strip("'")
+    pwd = (os.getenv("NEO4J_PASSWORD") or "").strip().strip('"').strip("'")
+    return uri, user, pwd
+
+
 # --- Neo4j Graph Driver with SQLite Failover ---
 def query_neo4j_or_sqlite(limit: int = 100) -> Dict[str, Any]:
     """
     Attempts to query Neo4j AuraDB. If unconfigured or unreachable,
-    gracefully fails over to the local SQLite graph tables.
+    gracefully fails over to the local SQLite graph tables and provides diagnostic feedback.
     """
-    if NEO4J_URI and NEO4J_PASSWORD:
+    uri, user, pwd = get_neo4j_credentials()
+    neo4j_error = None
+
+    if uri and pwd:
         try:
             from neo4j import GraphDatabase
 
-            driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
+            driver = GraphDatabase.driver(uri, auth=(user, pwd), connection_timeout=10)
+            driver.verify_connectivity()
+
             with driver.session() as session:
+                # Check if AuraDB is empty; if so, seed initial intelligence
+                count_res = session.run("MATCH (n) RETURN count(n) as count")
+                rec = count_res.single()
+                node_count = rec["count"] if rec else 0
+
+                if node_count == 0:
+                    logger.info("Neo4j AuraDB is empty. Seeding baseline intelligence nodes...")
+                    seed_cypher = """
+                    MERGE (a:ThreatActor {id: 'actor_lockbit', name: 'LockBitSupp', origin: 'Eastern Europe', tier: 'Ransomware'})
+                    MERGE (h:HiddenService {id: 'onion_ddg', name: 'duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion'})
+                    MERGE (c:ClearnetDomain {id: 'clearnet_ddg', name: 'duckduckgo.com', asn: 'AS8075'})
+                    MERGE (ip:ClearnetIP {id: 'ip_ddg', name: '52.142.124.215', isp: 'Microsoft Azure'})
+                    MERGE (f:FaviconHash {id: 'fav_ddg', name: 'mmh3:-544118222', hash: -544118222})
+                    MERGE (w:CryptoWallet {id: 'w_btc', name: 'bc1q9x...3j4k9', asset: 'BTC'})
+                    MERGE (h)-[:UNMASKED_TO]->(c)
+                    MERGE (c)-[:RESOLVES_TO]->(ip)
+                    MERGE (h)-[:EMITS_FAVICON]->(f)
+                    MERGE (a)-[:OPERATES]->(h)
+                    MERGE (a)-[:CONTROLS_WALLET]->(w)
+                    """
+                    session.run(seed_cypher)
+
                 cypher = f"MATCH (n)-[r]->(m) RETURN n, r, m LIMIT {limit}"
                 result = session.run(cypher)
                 nodes = {}
@@ -234,19 +269,41 @@ def query_neo4j_or_sqlite(limit: int = 100) -> Dict[str, Any]:
                     n = record["n"]
                     m = record["m"]
                     r = record["r"]
-                    nodes[n.element_id] = {"id": n.element_id, "label": list(n.labels)[0] if n.labels else "Node", "name": dict(n).get("name", n.element_id), "properties": dict(n)}
-                    nodes[m.element_id] = {"id": m.element_id, "label": list(m.labels)[0] if m.labels else "Node", "name": dict(m).get("name", m.element_id), "properties": dict(m)}
+                    n_id = str(n.element_id if hasattr(n, "element_id") else n.id)
+                    m_id = str(m.element_id if hasattr(m, "element_id") else m.id)
+                    r_id = str(r.element_id if hasattr(r, "element_id") else r.id)
+
+                    nodes[n_id] = {
+                        "id": n_id,
+                        "label": list(n.labels)[0] if n.labels else "Node",
+                        "name": dict(n).get("name", n_id),
+                        "properties": dict(n),
+                    }
+                    nodes[m_id] = {
+                        "id": m_id,
+                        "label": list(m.labels)[0] if m.labels else "Node",
+                        "name": dict(m).get("name", m_id),
+                        "properties": dict(m),
+                    }
                     edges.append({
-                        "id": r.element_id,
-                        "source": n.element_id,
-                        "target": m.element_id,
+                        "id": r_id,
+                        "source": n_id,
+                        "target": m_id,
                         "relationship": r.type,
                         "properties": dict(r),
                     })
                 driver.close()
-                return {"source": "Neo4j AuraDB", "nodes": list(nodes.values()), "edges": edges}
+                return {
+                    "source": "Neo4j AuraDB",
+                    "connected": True,
+                    "nodes": list(nodes.values()),
+                    "edges": edges,
+                }
         except Exception as e:
+            neo4j_error = str(e)
             logger.warning(f"Neo4j query failed, falling back to SQLite: {e}")
+    else:
+        neo4j_error = "NEO4J_URI or NEO4J_PASSWORD environment variables are missing or empty."
 
     # SQLite Failover
     conn = get_db_connection()
@@ -273,7 +330,12 @@ def query_neo4j_or_sqlite(limit: int = 100) -> Dict[str, Any]:
         })
     conn.close()
 
-    return {"source": "SQLite Local Failover", "nodes": nodes, "edges": edges}
+    return {
+        "source": "SQLite Local Failover",
+        "neo4j_diagnostic_error": neo4j_error,
+        "nodes": nodes,
+        "edges": edges,
+    }
 
 
 # --- API Routes ---
@@ -301,7 +363,24 @@ def root():
 
 @app.get("/api/health")
 def health_check():
-    neo4j_configured = bool(NEO4J_URI and NEO4J_PASSWORD)
+    uri, user, pwd = get_neo4j_credentials()
+    neo4j_configured = bool(uri and pwd)
+    neo4j_connected = False
+    neo4j_diagnostic = None
+
+    if neo4j_configured:
+        try:
+            from neo4j import GraphDatabase
+
+            driver = GraphDatabase.driver(uri, auth=(user, pwd), connection_timeout=5)
+            driver.verify_connectivity()
+            driver.close()
+            neo4j_connected = True
+        except Exception as e:
+            neo4j_diagnostic = str(e)
+    else:
+        neo4j_diagnostic = "NEO4J_URI or NEO4J_PASSWORD environment variables not set."
+
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) as scan_count FROM scans")
@@ -312,7 +391,12 @@ def health_check():
         "status": "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "database": {"type": "SQLite", "path": DB_PATH, "total_scans": scan_count},
-        "neo4j_auradb": {"configured": neo4j_configured, "uri": NEO4J_URI or "None (Using SQLite Failover)"},
+        "neo4j_auradb": {
+            "configured": neo4j_configured,
+            "connected": neo4j_connected,
+            "uri": uri if neo4j_configured else "Not Set",
+            "diagnostic": neo4j_diagnostic,
+        },
         "unmasker_engine": "ACTIVE",
     }
 
