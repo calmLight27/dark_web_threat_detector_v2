@@ -1,0 +1,25 @@
+# DeepTrace AI - Python Backend Requirements
+# Autonomous OSINT & Dark Web Threat Actor De-Anonymization Platform
+
+fastapi>=0.110.0,<1.0.0
+uvicorn[standard]>=0.28.0,<1.0.0
+pydantic>=2.6.4,<3.0.0
+requests>=2.31.0,<3.0.0
+httpx>=0.27.0,<1.0.0
+mmh3>=4.1.0,<5.0.0
+beautifulsoup4>=4.12.3,<5.0.0
+pyOpenSSL>=24.0.0,<25.0.0
+cryptography>=42.0.5,<43.0.0
+python-dotenv>=1.0.1,<2.0.0
+
+# Graph Database (Neo4j AuraDB with SQLite local failover)
+neo4j>=5.18.0,<6.0.0
+
+# Forensic PDF & STIX Dossier Export
+reportlab>=4.1.0,<5.0.0
+
+# Modules 3 & 4 Core Requirements (Local RAG & Stylometry)
+scikit-learn>=1.4.1,<2.0.0
+numpy>=1.26.4,<2.0.0
+sentence-transformers>=2.5.1,<3.0.0
+chromadb>=0.4.24,<0.5.0

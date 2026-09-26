@@ -1,0 +1,6 @@
+{
+  "name": "DeepTrace AI - Threat Actor De-Anonymization Platform",
+  "description": "Autonomous OSINT and Dark Web threat actor de-anonymization platform featuring Tor-to-clearnet infrastructure probing, stylometry analysis, local RAG intelligence, and court-ready forensic dossier exports.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
